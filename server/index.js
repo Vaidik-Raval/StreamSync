@@ -38,14 +38,13 @@ io.on('connection', (socket) => {
   let username = null;
   let isHost = false;
 
-  socket.on('join-room', ({ roomId: rid, username: uname, isHost: host }) => {
-    roomId = rid;
-    username = uname;
-    isHost = host;
-
+  socket.on('join-room', (data) => {
+    roomId = data.roomId;
+    username = data.username;
+    socket.isHost = data.isHost; // Store host status
+    
     socket.join(roomId);
-    socket.username = username;
-    socket.isHost = isHost;
+    // console.log(`User ${username} joined room ${roomId}${socket.isHost ? ' as host' : ''}`);
 
     // Initialize room data structures if they don't exist
     if (!rooms[roomId]) rooms[roomId] = [];
@@ -71,38 +70,53 @@ io.on('connection', (socket) => {
       message: `${username} joined the watch party.`
     });
 
-    // Send current video state to late joiners
+    // Send current video state to late joiners - IMPROVED SYNC
     if (roomStates[roomId] && roomStates[roomId].videoId) {
+      // console.log(`Syncing late joiner ${username} to current video:`, roomStates[roomId]);
+      
+      // First load the video
+      socket.emit('sync-video', {
+        type: 'load',
+        videoId: roomStates[roomId].videoId,
+        title: roomStates[roomId].title || 'Loading...'
+      });
+      
+      // Then sync the playback state after a delay
       setTimeout(() => {
-        socket.emit('sync-video', {
-          type: 'load',
-          videoId: roomStates[roomId].videoId,
-          title: roomStates[roomId].title || 'Loading...'
-        });
-        
-        setTimeout(() => {
+        if (roomStates[roomId].isPlaying) {
           socket.emit('sync-video', {
-            type: roomStates[roomId].isPlaying ? 'play' : 'pause',
+            type: 'play',
             currentTime: roomStates[roomId].currentTime || 0
           });
-        }, 1000);
-      }, 1000);
+        } else {
+          socket.emit('sync-video', {
+            type: 'pause',
+            currentTime: roomStates[roomId].currentTime || 0
+          });
+        }
+      }, 2000); // Increased delay to ensure video loads
     }
-  });
-
-  socket.on('queue-action', (data) => {
-    if (!roomId || !socket.isHost) return;
+  });  socket.on('queue-action', (data) => {
+    // console.log(`Queue action by ${username} (host: ${socket.isHost}):`, data.type);
+    
+    if (!roomId || !socket.isHost) {
+      // console.log(`Queue action rejected - not host or no room`);
+      return;
+    }
     
     const roomQueue = roomQueues[roomId];
     
     switch (data.type) {
       case 'add':
         // Add video to queue
-        roomQueue.queue.push({
+        const newVideo = {
           videoId: data.videoId,
           title: data.title || `Video ${roomQueue.queue.length + 1}`,
           addedBy: username
-        });
+        };
+        roomQueue.queue.push(newVideo);
+        
+        // console.log(`Added video to queue:`, newVideo);
         
         // If no video is currently playing, start the first one
         if (roomQueue.currentIndex === -1 && roomQueue.queue.length === 1) {
@@ -193,6 +207,8 @@ io.on('connection', (socket) => {
     if (index >= 0 && index < roomQueue.queue.length) {
       const video = roomQueue.queue[index];
       
+      // console.log(`Playing video from queue: ${video.title} (${video.videoId})`);
+      
       // Update room state
       roomStates[roomId] = {
         videoId: video.videoId,
@@ -207,24 +223,41 @@ io.on('connection', (socket) => {
         videoId: video.videoId,
         title: video.title
       });
+      
+      // Auto-play after a short delay to ensure video is loaded
+      setTimeout(() => {
+        io.to(roomId).emit('sync-video', {
+          type: 'play',
+          currentTime: 0
+        });
+      }, 1500);
     }
   }
 
   socket.on('video-action', (data) => {
-    if (!roomId || !socket.isHost) return;
+    // console.log(`Video action by ${username} (host: ${socket.isHost}):`, data.type);
+    
+    if (!roomId || !socket.isHost) {
+      // console.log(`Video action rejected - not host or no room`);
+      return;
+    }
     
     if (!roomStates[roomId]) roomStates[roomId] = {};
 
     if (data.type === 'play') {
       roomStates[roomId].isPlaying = true;
-      roomStates[roomId].currentTime = data.currentTime;
+      roomStates[roomId].currentTime = data.currentTime || 0;
+      // console.log(`Video playing at time: ${roomStates[roomId].currentTime}`);
     } else if (data.type === 'pause') {
       roomStates[roomId].isPlaying = false;
-      roomStates[roomId].currentTime = data.currentTime;
+      roomStates[roomId].currentTime = data.currentTime || 0;
+      // console.log(`Video paused at time: ${roomStates[roomId].currentTime}`);
     } else if (data.type === 'seek') {
-      roomStates[roomId].currentTime = data.currentTime;
+      roomStates[roomId].currentTime = data.currentTime || 0;
+      // console.log(`Video seeked to time: ${roomStates[roomId].currentTime}`);
     }
 
+    // Broadcast to all other clients (not the host who sent it)
     socket.to(roomId).emit('sync-video', data);
   });
 

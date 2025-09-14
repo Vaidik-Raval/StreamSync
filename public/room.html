@@ -227,6 +227,20 @@
             <span class="text-sm font-medium">Back to Home</span>
           </a>
           <div class="w-px h-6 bg-gray-600"></div>
+          
+          <!-- Connection Status -->
+          <div id="connectionStatus" class="flex items-center gap-2">
+            <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+            <span class="text-xs text-gray-400">Connecting...</span>
+          </div>
+          
+          <!-- Host Status -->
+          <div id="hostStatus" class="hidden flex items-center gap-2">
+            <div class="w-2 h-2 bg-yellow-400 rounded-full"></div>
+            <span class="text-xs text-yellow-400">Host</span>
+          </div>
+          
+          <div class="w-px h-6 bg-gray-600"></div>
           <div class="text-sm text-gray-400">
             <span class="hidden sm:inline">Room ID: </span><span class="font-mono text-indigo-400" id="displayRoomId"></span>
           </div>
@@ -548,45 +562,78 @@
     }
 
     function onPlayerStateChange(event) {
-      if (!isHost) return;
+      // console.log('Player state changed:', event.data, 'IsHost:', isHost);
+      
+      if (!isHost) return; // Only host controls video
       
       if (event.data === YT.PlayerState.ENDED) {
+        // console.log('Video ended, requesting next video');
         socket.emit('queue-action', { type: 'next' });
       } else if (event.data === YT.PlayerState.PLAYING) {
         const currentTime = player.getCurrentTime();
+        // console.log('Video playing, syncing at time:', currentTime);
         socket.emit('video-action', { type: 'play', currentTime });
       } else if (event.data === YT.PlayerState.PAUSED) {
         const currentTime = player.getCurrentTime();
+        // console.log('Video paused, syncing at time:', currentTime);
         socket.emit('video-action', { type: 'pause', currentTime });
       }
     }
 
-    // Sync current time every 5 seconds
+    // Sync current time every 5 seconds when host is playing
     setInterval(() => {
-      if (isHost && player && player.getPlayerState() === YT.PlayerState.PLAYING) {
+      if (isHost && player && player.getPlayerState && player.getPlayerState() === YT.PlayerState.PLAYING) {
         const currentTime = player.getCurrentTime();
         socket.emit('video-action', { type: 'seek', currentTime });
       }
     }, 5000);
 
     socket.on('sync-video', (data) => {
-      if (!player || typeof player.loadVideoById !== 'function') return;
+      // console.log('Received sync-video:', data);
+      
+      if (!player || typeof player.loadVideoById !== 'function') {
+        // console.log('Player not ready yet');
+        return;
+      }
 
       if (data.type === 'load') {
-        player.loadVideoById(data.videoId);
-        document.getElementById('currentVideoTitle').textContent = data.title || 'Loading...';
+        // console.log('Loading video:', data.videoId);
+        if (data.videoId) {
+          player.loadVideoById(data.videoId);
+          document.getElementById('currentVideoTitle').textContent = data.title || 'Loading...';
+        } else {
+          player.stopVideo();
+          document.getElementById('currentVideoTitle').textContent = data.title || 'No video';
+        }
       } else if (data.type === 'play') {
+        // console.log('Playing video at time:', data.currentTime);
+        if (data.currentTime !== undefined) {
+          player.seekTo(data.currentTime, true);
+        }
         player.playVideo();
-        if (data.currentTime) player.seekTo(data.currentTime, true);
       } else if (data.type === 'pause') {
+        // console.log('Pausing video at time:', data.currentTime);
+        if (data.currentTime !== undefined) {
+          player.seekTo(data.currentTime, true);
+        }
         player.pauseVideo();
-        if (data.currentTime) player.seekTo(data.currentTime, true);
       } else if (data.type === 'seek') {
-        player.seekTo(data.currentTime, true);
+        // Only sync seek if not host (to avoid feedback loop)
+        if (!isHost && data.currentTime !== undefined) {
+          const currentTime = player.getCurrentTime();
+          const timeDiff = Math.abs(currentTime - data.currentTime);
+          
+          // Only sync if time difference is significant (more than 2 seconds)
+          if (timeDiff > 2) {
+            // console.log('Syncing time from', currentTime, 'to', data.currentTime);
+            player.seekTo(data.currentTime, true);
+          }
+        }
       }
     });
 
     socket.on('queue-update', (data) => {
+      // console.log('Queue update received:', data);
       videoQueue = data.queue;
       currentVideoIndex = data.currentIndex;
       updateQueueDisplay();
@@ -630,6 +677,72 @@
         </li>
       `).join('');
     });
+
+    // Connection status handlers
+    socket.on('connect', () => {
+      // console.log('Connected to server');
+      updateConnectionStatus('connected');
+      
+      const roomId = getRoomId();
+      if (roomId) {
+        document.getElementById('displayRoomId').textContent = roomId;
+        joinRoom(roomId);
+      }
+    });
+
+    socket.on('disconnect', () => {
+      // console.log('Disconnected from server');
+      updateConnectionStatus('disconnected');
+    });
+
+    socket.on('room-joined', (data) => {
+      // console.log('Room joined:', data);
+      isHost = data.isHost;
+      updateHostStatus(data.isHost);
+      updateConnectionStatus('room-joined');
+      
+      if (data.isHost) {
+        // console.log('You are the host');
+      } else {
+        // console.log('You are a participant');
+      }
+    });
+
+    // Status update functions
+    function updateConnectionStatus(status) {
+      const statusElement = document.getElementById('connectionStatus');
+      const dot = statusElement.querySelector('div');
+      const text = statusElement.querySelector('span');
+      
+      switch (status) {
+        case 'connected':
+          dot.className = 'w-2 h-2 bg-yellow-400 rounded-full';
+          text.textContent = 'Connected';
+          break;
+        case 'room-joined':
+          dot.className = 'w-2 h-2 bg-emerald-400 rounded-full';
+          text.textContent = 'In Room';
+          break;
+        case 'disconnected':
+          dot.className = 'w-2 h-2 bg-red-500 rounded-full animate-pulse';
+          text.textContent = 'Disconnected';
+          break;
+        default:
+          dot.className = 'w-2 h-2 bg-red-500 rounded-full animate-pulse';
+          text.textContent = 'Connecting...';
+      }
+    }
+
+    function updateHostStatus(isHost) {
+      const hostStatus = document.getElementById('hostStatus');
+      if (isHost) {
+        hostStatus.classList.remove('hidden');
+        hostStatus.classList.add('flex');
+      } else {
+        hostStatus.classList.add('hidden');
+        hostStatus.classList.remove('flex');
+      }
+    }
 
     // Update video progress display
     setInterval(() => {
